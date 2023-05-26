@@ -13,57 +13,72 @@ library(here)
 library(ggplot2)
 ```
 
-# Aquatic Invertebrate WQ Data 
-```{r Cleaning, warning = FALSE}
+# AqInv water quality
+
+## Cleaning
+```{r warning = FALSE}
 
 # Make a cleaned table
-aqinv_2021 <- read.csv(here("data/AqInv_2020-22.csv")) %>%
+aqinv_2021 <- read_csv(here("data/AqInv_2020-22.csv")) %>% clean_names() %>%
   
   # Rename rows to remove special characters and periods
-  rename(Date = ï..Date,
-         Depth_cm = WQ.Measurement.Depth..cm.,
-         Sal_ppt = Salinity..ppt.,
-         Temp_C = Temperature..C.,
-         DO_mg_L = Dissolved.Oxygen..mg.L.) %>%
+  rename(depth_cm = wq_measurement_depth_cm,
+         sal_ppt = salinity_ppt,
+         temp_C = temperature_c,
+         DO_mg_L = dissolved_oxygen_mg_l,
+         DO_pct = dissolved_oxygen_percent,
+         pH = p_h,
+         cond_mS = conductivity_specific_m_s_cm) %>%
   
   # Select columns with measurements with spatial and temporal data
-  select(Date, Site, Depth_cm, Sal_ppt, Temp_C, DO_mg_L, pH) %>%
+  select(date, site, depth_cm, cond_mS, sal_ppt, temp_C, DO_mg_L, DO_pct, pH) %>%
   
   # Change data types
-  mutate(Sal_ppt = as.numeric(Sal_ppt),
-         Temp_C = as.numeric(Temp_C),
-         DO_mg_L = as.numeric(DO_mg_L),
-         pH = as.numeric(pH),
+  mutate(across(cond_mS:pH, as.numeric),
          # Bin dates by month
-         Date = dmy(Date),
+         date = dmy(date),
          # Consolidate NPB2 records
-         Site = replace(Site, Site == "NPB2 (at road)", "NPB2")) %>%
+         site = replace(site, site == "NPB2 (at road)", "NPB2")) %>%
    
   # Omit rows with NAs
   na.omit()
 
 # Table ready for join with points
 aqinv_2021 %>%
-  write.csv(file = here("output/AqInv_2022.csv"))
+  write.csv(file = here("output/aqinv_wq_20-22.csv"))
 ```
 
-```{r Visualize Over Time}
-aqinv_2021 %>% 
-  
-  # Choose a sample depth: "10cm below surface" | "5cm above bottom"
-  filter(Depth_cm == "10cm below surface",
-         Date > "2020-12-31") %>%
-  
-  # Choose a variable for the Y axis: Sal_ppt | Temp_C | DO_mg_L
-  ggplot(aes(x = Date, y = Sal_ppt)) + 
-  geom_point(aes(color = Site)) + 
-  geom_line(aes(color= Site, group = Site))
+## Visualization
+```{r }
+
+# Salinity
+aqinv_2021 %>%
+  ggplot(aes(x = date, y = sal_ppt)) +
+    geom_point(aes(color = site)) + 
+    geom_line(aes(color= site, group = site)) +
+    scale_x_date(date_breaks = "3 months", date_labels =  "%b %Y")
+
+# Temperature
+aqinv_2021 %>%
+   ggplot(aes(x = date, y = temp_C)) +
+    geom_point(aes(color = site)) + 
+    geom_line(aes(color= site, group = site)) +
+    scale_x_date(date_breaks = "3 months", date_labels =  "%b %Y")
+
+# Dissolved O2
+aqinv_2021 %>%
+  ggplot(aes(x = date, y = DO_mg_L)) +
+    geom_point(aes(color = site)) + 
+    geom_line(aes(color= site, group = site)) +
+    scale_x_date(date_breaks = "3 months", date_labels =  "%b %Y")
+
 
 ```
 
+# Levellogger water quality
 
-# Levellogger WQ Data
-```{r Cleaning Functions}
+## Cleaning functions
+```{r}
 
 YSICSVtrim <- function(CSV_file, Names_Row_Nbr) {
   trimmedCSV <- read.csv(CSV_file) %>%
@@ -71,86 +86,256 @@ YSICSVtrim <- function(CSV_file, Names_Row_Nbr) {
   return(trimmedCSV)
 }
 
-YSIclean <- function(logger, 
-                     # Date M/D/Y, conductivity uS/cm, temp Celsius
-                     site_ID, date, cond, temp, WSE) {
+YSIclean <- function(logger, # Logger file
+                     site # Name to put in site column
+                     ) {
   
-  cleanedYSI <- logger %>%
+  cleanedYSI <- logger %>% 
     
-    select(date, cond, temp, WSE) %>%
+    clean_names() %>%
     
-    rename(Date = date,
-           Conductivity = cond,
-           Temp_C = temp,
-           WSE = WSE) %>%
+    rename_with(~ case_when(
+        str_detect(.x, "date") & !(str_detect(.x, "time") | str_detect(.x, "text")) ~ "date",
+        str_detect(.x, "bga") & str_detect(.x, "ug") ~ "bga_pc_ug_L",
+        str_detect(.x, "chlorophyll") & str_detect(.x, "ug") ~ "chloro_ug_L",
+        ((str_detect(.x, "cond") & str_detect(.x, "sp")) |
+           (str_detect(.x, "cond") & str_detect(.x, "u_s"))) & 
+          !str_detect(.x, "2") & !str_detect(.x, "adj") ~ "cond_spec_uS_cm",
+        str_detect(.x, "tds") ~ "tds_mg_L",
+        str_detect(.x, "sal") & !str_detect(.x, "psu") ~ "sal_ppt",
+        str_detect(.x, "odo") & str_detect(.x, "sat")  ~ "DO_pct",
+        str_detect(.x, "odo") & (str_detect(.x, "mg") | str_detect(.x, "m_g"))  ~ "DO_mg_L",
+        (str_detect(.x, "p_h") | str_detect(.x, "ph")) & !str_detect(.x, "m_v") & !str_detect(.x, "phyll") ~ "pH",
+        str_detect(.x, "temp") ~ "temp_C",
+        str_detect(.x, "wse")  ~ "wse_navd",
+        TRUE ~ .x), everything()) %>%
+
+    mutate(site = site) %>%
+  
+    select(any_of(c("site", "date", "wse_navd", "temp_C", "cond_spec_uS_cm", "sal_ppt", "tds_mg_L", 
+                    "pH", "DO_mg_L", "DO_pct", "bga_pc_ug_L", "chloro_ug_L"))) %>%
     
-    mutate(Site = site_ID,
-           Date = mdy(Date),
-           Conductivity = as.numeric(Conductivity),
-           Temp_C = as.numeric(Temp_C),
-           WSE = as.numeric(WSE),
-           Site_name = case_when(Site == "3" ~ "Venoco Bridge",
-                                 Site == "6" ~ "East Arm",
-                                 Site == "7" ~ "COPR Pier"))
+    mutate(date = mdy(date),
+           across(3:ncol(.), as.numeric),) %>%
+    
+    drop_na(temp_C)
   
   return(cleanedYSI)
 }
 
 ```
 
+## Executing cleaning
 ```{r Loading in and Cleaning Data, warning=FALSE, include=FALSE}
-
 # COPR Pier
-COPRpier_2018 <- read.csv(here("data/YSI_COPRpier_2018.csv")) %>%
-  YSIclean("7", "Date", "Cond.µS.cm", "Temp.C", "WSE_ft_NAVD")
-COPRpier_2019 <- read.csv(here("data/YSI_COPRpier_2019.csv")) %>%
-  YSIclean("7", "Date", "Cond.µS.cm", "Temp..C", "WSE_ft_NAVD_1.18")
-COPRpier_2020 <- read.csv(here("data/YSI_COPRpier_2020.csv")) %>%
-  YSIclean("7", "Date..MM.DD.YYYY.", "Cond.µS.cm", "Temp..C",
-           "WSE.based.on.Staff.Gauge.Avg...ft.")
-COPRpier_2021 <- read.csv(here("data/YSI_COPRpier_2021.csv")) %>%
-  YSIclean("7", "Date.x", "Cond.µS.cm", "Temp..C",
-           "Chlorophyll.cells.mL") # Chloro is dummy NA column
+COPRpier_2018 <- read.csv(here("data/YSI_COPRpier_2018.csv"), fileEncoding="latin1") %>% 
+  YSIclean("PIER")
+COPRpier_2019 <- read.csv(here("data/YSI_COPRpier_2019.csv"), fileEncoding="latin1") %>%
+  YSIclean("PIER")
+COPRpier_2020 <- read.csv(here("data/YSI_COPRpier_2020.csv"), fileEncoding="latin1") %>% 
+  YSIclean("PIER")
+COPRpier_2021 <- read.csv(here("data/YSI_COPRpier_2021.csv"), fileEncoding="latin1") %>% 
+  YSIclean("PIER") # dummy column with NAs
 
 # East Channel
-EastChannel_2019 <- YSICSVtrim(here("data/YSI_EastChannel_2019.csv"), 13) %>%
-  YSIclean("6", "Date", "CONDUCTIVITY (uS/cm)", 
-           "TEMPERATURE (C)", "WSE (ft)")
+EastChannel_2019 <- YSICSVtrim(here("data/YSI_EastChannel_2019.csv"), 13) %>% 
+  YSIclean("NEC")
 EastChannel_2020 <- YSICSVtrim(here("data/YSI_EastChannel_2020.csv"), 9) %>%
-  YSIclean("6", "Date", "CONDUCTIVITY (uS/cm)", "TEMPERATURE (C)", "WSE (ft)")
+  YSIclean("NEC")
 EastChannel_2021 <- read.csv(here("data/YSI_EastChannel_2021_c.csv")) %>%
-  YSIclean("6", "Date", "CONDUCTIVITY", "TEMPERATURE", "WSE_ft")
+  YSIclean("NEC")
 
 # Venoco
 Venoco_2019 <- YSICSVtrim(here("data/YSI_Venoco_2019.csv"), 10) %>%
-  YSIclean("3", "Date", "CONDUCTIVITY (uS/cm)", 
-           "TEMPERATURE (C)", "WSE (ft)")
+  YSIclean("NVBR")
 Venoco_2020 <- YSICSVtrim(here("data/YSI_Venoco_2020.csv"), 7) %>%
-  YSIclean("3", "Date", "CONDUCTIVITY (uS/cm)", "TEMPERATURE (C)", "WSE (ft)")
+  YSIclean("NVBR")
 
 all_levelloggers <- bind_rows(COPRpier_2018, COPRpier_2019, COPRpier_2020, COPRpier_2021, EastChannel_2019, EastChannel_2020, EastChannel_2021, Venoco_2019, Venoco_2020)
+
+# Get NA count by column
+map(all_levelloggers, ~sum(is.na(.)))
+
+write_csv(all_levelloggers, "output/all_levelloggers.csv")
+```
+```{r}
+rm(COPRpier_2018, COPRpier_2019, COPRpier_2020, COPRpier_2021, EastChannel_2019, EastChannel_2020, EastChannel_2021, Venoco_2019, Venoco_2020)
 ```
 
-```{r Graph of Conductivity, echo=FALSE, fig.height=3, fig.width=8}
-all_levelloggers %>%
-  filter(Date > "2018-10-01",
-         Conductivity > 1000) %>%
-  ggplot(aes(x = Date, y = Conductivity, color = Site_name)) +
-  geom_point() +
+## Visualization
+
+### Conductivity
+```{r}
+wqPlot <- list()
+```
+```{r echo=FALSE, fig.height=4, fig.width=10}
+wqPlot$sal$point <- all_levelloggers %>%
+  filter(date > "2018-10-01", cond_spec_uS_cm > 1000) %>%
+  ggplot(aes(x = date, y = cond_spec_uS_cm, color = site)) +
+  geom_point(size = 0.5) +
   scale_x_date(date_breaks = "2 months", date_labels =  "%b %Y") +
   theme(axis.text.x=element_text(angle=60, hjust=1)) +
   ggtitle("NCOS Conductivity")
 
+wqPlot$sal$point
+
+ggsave("output/YSI_sal_point.jpg", height = 4, width = 10)
 ```
 
-```{r Graph of WSE, echo=FALSE, fig.height=3, fig.width=8}
-all_levelloggers %>%
-  filter(Date > "2018-10-01",
-         Date < "2020-08-15") %>%
-  ggplot(aes(x = Date, y = WSE, color = Site_name)) +
-  geom_point() +
+```{r fig.height=4, fig.width=10}
+wqPlot$sal$gam <- all_levelloggers %>%
+  filter(date > "2018-10-01", cond_spec_uS_cm > 1000) %>%
+  ggplot(aes(x = date, y = cond_spec_uS_cm, color = site)) +
+  geom_smooth(method = "gam") +
   scale_x_date(date_breaks = "2 months", date_labels =  "%b %Y") +
   theme(axis.text.x=element_text(angle=60, hjust=1)) +
-  ggtitle("NCOS Water Stage Elevation")
+  ggtitle("NCOS Conductivity")
 
+wqPlot$sal$gam
+
+ggsave("output/YSI_sal_gam.jpg", height = 4, width = 10)
+```
+
+```{r fig.height=4, fig.width=10}
+wqPlot$sal$loess <- all_levelloggers %>%
+  filter(date > "2018-10-01", cond_spec_uS_cm > 1000) %>%
+  ggplot(aes(x = date, y = cond_spec_uS_cm, color = site)) +
+  geom_smooth(method = "loess", span = 0.01) +
+  scale_x_date(date_breaks = "2 months", date_labels =  "%b %Y") +
+  theme(axis.text.x=element_text(angle=60, hjust=1)) +
+  ggtitle("NCOS Conductivity")
+
+wqPlot$sal$loess 
+
+ggsave("output/YSI_sal_loess.jpg", height = 4, width = 10)
+```
+
+### Water elevation
+```{r echo=FALSE, fig.height=4, fig.width=10}
+wqPlot$wse$point <- all_levelloggers %>% filter(date > "2018-10-01",
+                                                date < "2020-08-30") %>%
+  ggplot(aes(x = date, y = wse_navd, color = site)) +
+  geom_point(size = 0.5) +
+  scale_x_date(date_breaks = "2 months", date_labels =  "%b %Y") +
+  theme(axis.text.x=element_text(angle = 60, hjust = 1)) +
+  ggtitle("NCOS Water Surface Elevation") 
+
+wqPlot$wse$point
+
+ggsave("output/YSI_wse_point.jpg", height = 4, width = 10)
+```
+
+```{r echo=FALSE, fig.height=4, fig.width=10}
+wqPlot$wse$gam <- all_levelloggers %>% filter(date > "2018-10-01",
+                                              date < "2020-08-30") %>%
+  ggplot(aes(x = date, y = wse_navd, color = site)) +
+  geom_smooth(method = "gam") +
+  scale_x_date(date_breaks = "2 months", date_labels =  "%b %Y") +
+  theme(axis.text.x=element_text(angle = 60, hjust = 1)) +
+  ggtitle("NCOS Water Surface Elevation") 
+
+wqPlot$wse$gam
+
+ggsave("output/YSI_wse_gam.jpg", height = 4, width = 10)
+```
+
+```{r echo=FALSE, fig.height=4, fig.width=10}
+wqPlot$wse$loess <- all_levelloggers %>% filter(date > "2018-10-01",
+                                                date < "2020-08-30") %>%
+  ggplot(aes(x = date, y = wse_navd, color = site)) +
+  geom_smooth(method = "loess", span = 0.01) +
+  scale_x_date(date_breaks = "2 months", date_labels =  "%b %Y") +
+  theme(axis.text.x=element_text(angle = 60, hjust = 1)) +
+  ggtitle("NCOS Water Surface Elevation") 
+
+wqPlot$wse$loess
+
+ggsave("output/YSI_wse_loess.jpg", height = 4, width = 10)
+```
+
+### Temperature
+```{r echo=FALSE, fig.height=4, fig.width=10}
+wqPlot$temp$gam <- all_levelloggers %>% filter(date < "2020-08-30",
+                                               date > "2018-10-01") %>%
+  ggplot(aes(x = date, y = temp_C, color = site)) +
+  geom_smooth(method = "gam") +
+  scale_x_date(date_breaks = "2 months", date_labels =  "%b %Y") +
+  theme(axis.text.x=element_text(angle = 60, hjust = 1)) +
+  ggtitle("NCOS Temperature") 
+
+wqPlot$temp$gam
+
+ggsave("output/YSI_temp_gam.jpg", height = 4, width = 10)
+```
+
+### Total dissolved solids
+```{r echo=FALSE, fig.height=4, fig.width=10}
+wqPlot$tds$point <- all_levelloggers %>% filter(date < "2020-08-30") %>%
+  filter(date > "2018-10-01") %>%
+  ggplot(aes(x = date, y = temp_C, color = site)) +
+  geom_point(size = 0.5) +
+  scale_x_date(date_breaks = "2 months", date_labels =  "%b %Y") +
+  theme(axis.text.x=element_text(angle = 60, hjust = 1)) +
+  ggtitle("NCOS Total Dissolved Solids") 
+
+wqPlot$tds$point
+
+ggsave("output/YSI_tds_point.jpg", height = 4, width = 10)
+```
+
+### pH
+```{r echo=FALSE, fig.height=4, fig.width=10}
+wqPlot$pH$loess <- all_levelloggers %>% filter(date > "2017-10-15",
+                                               date < "2018-02-15") %>%
+  ggplot(aes(x = date, y = pH, color = site)) +
+  geom_smooth(method = "loess", span = 0.1) +
+  scale_x_date(date_breaks = "1 month", date_labels =  "%b %Y") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+  ggtitle("NCOS pH") 
+
+wqPlot$pH$loess
+
+ggsave("output/YSI_pH_loess.jpg", height = 4, width = 10)
+```
+
+### Dissolved oxygen mg/L
+```{r echo=FALSE, fig.height=4, fig.width=10}
+wqPlot$DOmg$point <- all_levelloggers %>%
+  ggplot(aes(x = date, y = DO_mg_L, color = site)) +
+  geom_point(size = 0.5) +
+  scale_x_date(date_breaks = "2 months", date_labels =  "%b %Y") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+  ggtitle("NCOS DO mg/L") 
+
+wqPlot$DOmg$point
+
+ggsave("output/YSI_DOmg_point.jpg", height = 4, width = 10)
+```
+
+### Cyanobacteria
+```{r echo=FALSE, fig.height=4, fig.width=10}
+wqPlot$bga$point <- all_levelloggers %>%
+  ggplot(aes(x = date, y = bga_pc_ug_L, color = site)) +
+  geom_point(size = 0.5) +
+  scale_x_date(date_breaks = "2 months", date_labels =  "%b %Y") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+  ggtitle("NCOS BGA PC ug/L")
+
+wqPlot$bga$point
+
+ggsave("output/YSI_bga_point.jpg", height = 4, width = 10)
+```
+
+### Algae
+```{r echo=FALSE, fig.height=4, fig.width=10}
+wqPlot$chloro$point <- all_levelloggers %>%
+  ggplot(aes(x = date, y = chloro_ug_L, color = site)) +
+  geom_point(size = 0.5) +
+  scale_x_date(date_breaks = "2 months", date_labels =  "%b %Y") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+  ggtitle("NCOS Chlorophyll A ug/L")
+
+wqPlot$chloro$point
+
+ggsave("output/YSI_chloro_point.jpg", height = 4, width = 10)
 ```
